@@ -1,0 +1,99 @@
+# trigger: none
+
+# pool: myAgentPool
+
+# variables:
+# - group: TerraformVariables
+
+# steps:
+
+# - task: TerraformInstaller@1
+#   inputs:
+#     terraformVersion: '1.10.0'
+
+# - script: |
+#     cd terraform
+#     terraform init
+#   displayName: 'Terraform Init'
+
+# - script: |
+#     cd terraform
+#     terraform plan -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
+#   displayName: 'Terraform Plan'
+
+# - script: |
+#     cd terraform
+#     terraform apply -auto-approve -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
+#   displayName: 'Terraform Apply'
+trigger: none
+
+pool: myAgentPool
+
+variables:
+- group: TerraformVariables
+- name: tag
+  value: "$(Build.BuildId)"
+- name: dockerRegistry
+  value: "mytestacrforterraform.azurecr.io"
+- name: kubernetesNamespace
+  value: "default"
+
+steps:
+- task: TerraformInstaller@1
+  inputs:
+    terraformVersion: '1.10.0'
+
+- script: |
+    cd terraform
+    terraform init
+  displayName: 'Terraform Init'
+
+- script: |
+    cd terraform
+    terraform plan -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
+  displayName: 'Terraform Plan'
+
+- script: |
+    cd terraform
+    terraform apply -auto-approve -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
+  displayName: 'Terraform Apply'
+
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: 'myServiceConnection'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      # Enable Azure Application Gateway Ingress Controller
+      az aks approuting enable --resource-group $(resource_group_name) --name $(aks_cluster_name)
+  displayName: 'Enable AGIC'
+
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: 'myServiceConnection'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      # Log in to Azure Container Registry
+      az acr login --name $(dockerRegistry)
+
+      # Build and Push app1
+      docker build -f app1/app1.dockerfile -t $(dockerRegistry)/app1:$(tag) .
+      docker push $(dockerRegistry)/app1:$(tag)
+
+      # Build and Push app2
+      docker build -f app2/app2.dockerfile -t $(dockerRegistry)/app2:$(tag) .
+      docker push $(dockerRegistry)/app2:$(tag)
+
+- task: KubernetesManifest@1
+  inputs:
+    action: 'deploy'
+    connectionType: 'azureResourceManager'
+    azureSubscription: 'myServiceConnection'
+    azureResourceGroup: '$(resource_group_name)'
+    kubernetesCluster: '$(aks_cluster_name)'
+    namespace: '$(kubernetesNamespace)'
+    manifests: 'manifests/*.yaml'
+    containers: |
+      $(dockerRegistry)/app1:$(tag)
+      $(dockerRegistry)/app2:$(tag)
