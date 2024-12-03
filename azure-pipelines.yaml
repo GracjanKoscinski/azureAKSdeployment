@@ -1,30 +1,3 @@
-# trigger: none
-
-# pool: myAgentPool
-
-# variables:
-# - group: TerraformVariables
-
-# steps:
-
-# - task: TerraformInstaller@1
-#   inputs:
-#     terraformVersion: '1.10.0'
-
-# - script: |
-#     cd terraform
-#     terraform init
-#   displayName: 'Terraform Init'
-
-# - script: |
-#     cd terraform
-#     terraform plan -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
-#   displayName: 'Terraform Plan'
-
-# - script: |
-#     cd terraform
-#     terraform apply -auto-approve -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
-#   displayName: 'Terraform Apply'
 trigger: none
 
 pool: myAgentPool
@@ -37,63 +10,98 @@ variables:
   value: "mytestacrforterraform.azurecr.io"
 - name: kubernetesNamespace
   value: "default"
+- name: resource_group_name
+  value: "myTerraformResourceGroup"
+- name: aks_cluster_name
+  value: "myAKSCluster"
 
-steps:
-- task: TerraformInstaller@1
-  inputs:
-    terraformVersion: '1.10.0'
+stages:
+- stage: TerraformInfrastructureValidation
+  jobs:
+  - job: TerraformInitAndValidate
+    displayName: 'Terraform Init and Validate'
+    steps:
+      - task: TerraformInstaller@1
+        inputs:
+          terraformVersion: '1.10.0'
+      - script: |
+          cd terraform
+          terraform init
+        displayName: 'Terraform Init'
+      - script: |
+          cd terraform
+          terraform validate
+        displayName: 'Terraform Validate'
 
-- script: |
-    cd terraform
-    terraform init
-  displayName: 'Terraform Init'
+- stage: TerraformInfrastructureDeployment
+  dependsOn: TerraformInfrastructureValidation
+  condition: succeeded('TerraformInfrastructureValidation')
+  jobs:
+  - job: TerraformPlanAndApply
+    displayName: 'Terraform Plan and Apply'
+    steps:
+      - task: TerraformInstaller@1
+        inputs:
+          terraformVersion: '1.10.0'
+      - script: |
+          cd terraform
+          terraform init
+        displayName: 'Terraform Init'
+      - script: |
+          cd terraform
+          terraform plan -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
+        displayName: 'Terraform Plan'
+      - script: |
+          cd terraform
+          terraform apply -auto-approve -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
+        displayName: 'Terraform Apply'
+      - task: AzureCLI@2
+        inputs:
+          azureSubscription: 'myServiceConnection'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            # Enable Azure Application Gateway Ingress Controller
+            az aks approuting enable --resource-group $(resource_group_name) --name $(aks_cluster_name)
+        displayName: 'Enable AGIC'
 
-- script: |
-    cd terraform
-    terraform plan -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
-  displayName: 'Terraform Plan'
+- stage: BuildDockerImagesAndDeployToAKS
+  dependsOn: TerraformInfrastructureDeployment
+  condition: succeeded('TerraformInfrastructureDeployment')
+  jobs:
+  - job: BuildAndPushDockerImages
+    displayName: 'Build and Push Docker Images'
+    steps:
+      - task: AzureCLI@2
+        inputs:
+          azureSubscription: 'myServiceConnection'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            # Log in to Azure Container Registry
+            az acr login --name $(dockerRegistry)
 
-- script: |
-    cd terraform
-    terraform apply -auto-approve -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
-  displayName: 'Terraform Apply'
+            # Build and Push app1
+            docker build -f app1/app1.dockerfile -t $(dockerRegistry)/app1:$(tag) .
+            docker push $(dockerRegistry)/app1:$(tag)
 
-- task: AzureCLI@2
-  inputs:
-    azureSubscription: 'myServiceConnection'
-    scriptType: 'bash'
-    scriptLocation: 'inlineScript'
-    inlineScript: |
-      # Enable Azure Application Gateway Ingress Controller
-      az aks approuting enable --resource-group $(resource_group_name) --name $(aks_cluster_name)
-  displayName: 'Enable AGIC'
-
-- task: AzureCLI@2
-  inputs:
-    azureSubscription: 'myServiceConnection'
-    scriptType: 'bash'
-    scriptLocation: 'inlineScript'
-    inlineScript: |
-      # Log in to Azure Container Registry
-      az acr login --name $(dockerRegistry)
-
-      # Build and Push app1
-      docker build -f app1/app1.dockerfile -t $(dockerRegistry)/app1:$(tag) .
-      docker push $(dockerRegistry)/app1:$(tag)
-
-      # Build and Push app2
-      docker build -f app2/app2.dockerfile -t $(dockerRegistry)/app2:$(tag) .
-      docker push $(dockerRegistry)/app2:$(tag)
-
-- task: KubernetesManifest@1
-  inputs:
-    action: 'deploy'
-    connectionType: 'azureResourceManager'
-    azureSubscription: 'myServiceConnection'
-    azureResourceGroup: '$(resource_group_name)'
-    kubernetesCluster: '$(aks_cluster_name)'
-    namespace: '$(kubernetesNamespace)'
-    manifests: 'manifests/*.yaml'
-    containers: |
-      $(dockerRegistry)/app1:$(tag)
-      $(dockerRegistry)/app2:$(tag)
+            # Build and Push app2
+            docker build -f app2/app2.dockerfile -t $(dockerRegistry)/app2:$(tag) .
+            docker push $(dockerRegistry)/app2:$(tag)
+        displayName: 'Build and Push Docker Images'
+  - job: DeployToAKS
+    displayName: 'Deploy to AKS'
+    steps:
+      - task: KubernetesManifest@1
+        inputs:
+          action: 'deploy'
+          connectionType: 'azureResourceManager'
+          azureSubscriptionEndpoint: 'myServiceConnection'
+          azureResourceGroup: '$(resource_group_name)'
+          kubernetesCluster: '$(aks_cluster_name)'
+          namespace: '$(kubernetesNamespace)'
+          manifests: 'manifests/*.yaml'
+          containers: |
+            $(dockerRegistry)/app1:$(tag)
+            $(dockerRegistry)/app2:$(tag)
+        displayName: 'Deploy to AKS'
