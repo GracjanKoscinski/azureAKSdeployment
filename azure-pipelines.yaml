@@ -11,10 +11,12 @@ variables:
 - name: kubernetesNamespace
   value: "default"
 - name: resource_group_name
-  value: "myTerraformResourceGroup"
+  value: "myTestResourceGroup"
 - name: aks_cluster_name
   value: "myAKSCluster"
-
+- name: environment
+  value: "non-prod" #can be changed to prod
+  
 stages:
 - stage: TerraformInfrastructureValidation
   jobs:
@@ -49,11 +51,11 @@ stages:
         displayName: 'Terraform Init'
       - script: |
           cd terraform
-          terraform plan -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
+          terraform plan -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)" -var-file="$(environment).tfvars"
         displayName: 'Terraform Plan'
       - script: |
           cd terraform
-          terraform apply -auto-approve -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)"
+          terraform apply -auto-approve -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)" -var-file="$(environment).tfvars"
         displayName: 'Terraform Apply'
       - task: AzureCLI@2
         inputs:
@@ -91,6 +93,7 @@ stages:
         displayName: 'Build and Push Docker Images'
   - job: DeployToAKS
     displayName: 'Deploy to AKS'
+    dependsOn: BuildAndPushDockerImages
     steps:
       - task: KubernetesManifest@1
         inputs:
